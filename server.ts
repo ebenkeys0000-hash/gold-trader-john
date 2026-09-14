@@ -1,39 +1,13 @@
 import express from 'express';
 import path from 'path';
 import dotenv from 'dotenv';
-import cookieParser from 'cookie-parser';
 import { createServer as createViteServer } from 'vite';
-import { apiRouter } from './server/api';
-import { renderConfigStatusHtml } from './server/configStatusPage';
+import { app } from './server/app';
 
 dotenv.config();
 
 async function startServer() {
-  const app = express();
   const PORT = 3000;
-
-  // Trust proxy for secure cookies behind reverse proxy
-  app.set('trust proxy', 1);
-
-  // JSON Body Parser with size limits
-  app.use(express.json({ limit: '5mb' }));
-
-  // Cookie parser for HttpOnly session authentication
-  app.use(cookieParser());
-
-  // API Health check
-  app.get('/api/health', (req, res) => {
-    res.json({ status: 'ok', timestamp: new Date().toISOString() });
-  });
-
-  // Server-Side Configuration Status Page (No secrets exposed)
-  app.get('/config-status', (req, res) => {
-    res.setHeader('Content-Type', 'text/html; charset=utf-8');
-    res.send(renderConfigStatusHtml());
-  });
-
-  // Mount API router
-  app.use('/api', apiRouter);
 
   // Vite middleware for development / Static files for production
   if (process.env.NODE_ENV !== 'production') {

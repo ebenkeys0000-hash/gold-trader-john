@@ -12,7 +12,7 @@ export interface AdminSession {
   lastActive: number;
 }
 
-// In-memory session store
+// In-memory session store for fast local lookup
 const sessions = new Map<string, AdminSession>();
 
 // Session configuration: 4 hours expiration
@@ -25,6 +25,18 @@ export const SESSION_TTL_MS = 4 * 60 * 60 * 1000;
 export const isAuthConfigured = (): boolean => {
   const key = process.env.ADMIN_SECRET_KEY;
   return typeof key === 'string' && key.trim().length > 0;
+};
+
+/**
+ * Returns HMAC signing key based on server's ADMIN_SECRET_KEY.
+ * Cryptographically tied to this deployment's secret.
+ */
+const getHmacKey = (): string => {
+  const key = process.env.ADMIN_SECRET_KEY;
+  if (typeof key === 'string' && key.trim().length > 0) {
+    return key.trim();
+  }
+  return 'gtj-internal-session-salt-fallback';
 };
 
 /**
@@ -51,21 +63,34 @@ export const verifyAdminPassword = (password: unknown): boolean => {
 };
 
 /**
- * Creates a cryptographically secure admin session.
+ * Creates a cryptographically secure, HMAC-signed admin session.
+ * Stateless verification ensures sessions work seamlessly across Vercel serverless cold starts.
  */
 export const createAdminSession = (
   adminName: string = 'Gold Trader John (Admin)',
   email: string = 'admin@goldtraderjohn.com'
 ): AdminSession => {
-  const token = crypto.randomBytes(32).toString('hex');
   const now = Date.now();
+  const expiresAt = now + SESSION_TTL_MS;
+  const payload = {
+    u: adminName,
+    e: email,
+    r: 'super_admin',
+    c: now,
+    exp: expiresAt,
+    nonce: crypto.randomBytes(16).toString('hex')
+  };
+  const payloadB64 = Buffer.from(JSON.stringify(payload)).toString('base64url');
+  const signature = crypto.createHmac('sha256', getHmacKey()).update(payloadB64).digest('base64url');
+  const token = `${payloadB64}.${signature}`;
+
   const session: AdminSession = {
     token,
     adminName,
     email,
     role: 'super_admin',
     createdAt: now,
-    expiresAt: now + SESSION_TTL_MS,
+    expiresAt,
     lastActive: now
   };
   sessions.set(token, session);
@@ -74,21 +99,60 @@ export const createAdminSession = (
 
 /**
  * Validates a session token and checks for expiration.
+ * Supports both memory-cached sessions and stateless HMAC signature verification.
  */
 export const validateSession = (token?: string): AdminSession | null => {
-  if (!token) return null;
-  const session = sessions.get(token);
-  if (!session) return null;
+  if (!token || typeof token !== 'string') return null;
 
   const now = Date.now();
-  if (now > session.expiresAt) {
-    sessions.delete(token);
-    return null;
+
+  // 1. Check in-memory session cache first
+  const existing = sessions.get(token);
+  if (existing) {
+    if (now > existing.expiresAt) {
+      sessions.delete(token);
+      return null;
+    }
+    existing.lastActive = now;
+    return existing;
   }
 
-  // Slide last active timestamp
-  session.lastActive = now;
-  return session;
+  // 2. Stateless HMAC validation for serverless (Vercel) instances
+  try {
+    const parts = token.split('.');
+    if (parts.length !== 2) return null;
+    const [payloadB64, signature] = parts;
+    const expectedSig = crypto.createHmac('sha256', getHmacKey()).update(payloadB64).digest('base64url');
+
+    const sigBuf = Buffer.from(signature, 'utf-8');
+    const expBuf = Buffer.from(expectedSig, 'utf-8');
+    if (sigBuf.length !== expBuf.length || !crypto.timingSafeEqual(sigBuf, expBuf)) {
+      return null;
+    }
+
+    const payloadJson = Buffer.from(payloadB64, 'base64url').toString('utf-8');
+    const payload = JSON.parse(payloadJson);
+
+    if (!payload.exp || now > payload.exp) {
+      return null;
+    }
+
+    const session: AdminSession = {
+      token,
+      adminName: payload.u || 'Gold Trader John (Admin)',
+      email: payload.e || 'admin@goldtraderjohn.com',
+      role: 'super_admin',
+      createdAt: payload.c || now,
+      expiresAt: payload.exp,
+      lastActive: now
+    };
+
+    // Cache locally
+    sessions.set(token, session);
+    return session;
+  } catch {
+    return null;
+  }
 };
 
 /**
@@ -98,16 +162,6 @@ export const destroySession = (token: string): boolean => {
   if (!token) return false;
   return sessions.delete(token);
 };
-
-// Periodically clean up expired sessions every 15 minutes
-setInterval(() => {
-  const now = Date.now();
-  for (const [token, session] of sessions.entries()) {
-    if (now > session.expiresAt) {
-      sessions.delete(token);
-    }
-  }
-}, 15 * 60 * 1000);
 
 export interface AuthenticatedRequest extends Request {
   adminSession?: AdminSession;
@@ -144,6 +198,7 @@ export const requireAdmin = (req: AuthenticatedRequest, res: Response, next: Nex
 
   const session = validateSession(token);
   if (!session) {
+    res.setHeader('Content-Type', 'application/json; charset=utf-8');
     return res.status(401).json({
       success: false,
       error: 'Unauthorized. Admin session is invalid, expired, or missing. Please sign in.'

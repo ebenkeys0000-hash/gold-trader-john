@@ -12,8 +12,22 @@ import {
   AdvertisementItem
 } from '../src/types';
 
-const DATA_DIR = path.join(process.cwd(), 'data');
-const DB_FILE = path.join(DATA_DIR, 'cms_store.json');
+function getStorageConfig() {
+  const isVercel = !!process.env.VERCEL;
+  if (isVercel) {
+    return {
+      writeDir: '/tmp',
+      writeFile: path.join('/tmp', 'cms_store.json'),
+      seedFile: path.join(process.cwd(), 'data', 'cms_store.json')
+    };
+  }
+  const localDir = path.join(process.cwd(), 'data');
+  return {
+    writeDir: localDir,
+    writeFile: path.join(localDir, 'cms_store.json'),
+    seedFile: null
+  };
+}
 
 // Default initial state matching Google Sheets schemas
 const DEFAULT_SITE_CONTENT: SiteContentItem[] = [
@@ -499,11 +513,28 @@ class CmsStore {
 
   private loadFromDisk() {
     try {
-      if (!fs.existsSync(DATA_DIR)) {
-        fs.mkdirSync(DATA_DIR, { recursive: true });
+      const { writeDir, writeFile, seedFile } = getStorageConfig();
+      if (!fs.existsSync(writeDir)) {
+        try {
+          fs.mkdirSync(writeDir, { recursive: true });
+        } catch {
+          // Ignore if directory cannot be created
+        }
       }
-      if (fs.existsSync(DB_FILE)) {
-        const raw = fs.readFileSync(DB_FILE, 'utf-8');
+
+      // If in Vercel and /tmp file not yet initialized, seed from repository data/cms_store.json if available
+      if (seedFile && !fs.existsSync(writeFile) && fs.existsSync(seedFile)) {
+        try {
+          const seedContent = fs.readFileSync(seedFile, 'utf-8');
+          fs.writeFileSync(writeFile, seedContent, 'utf-8');
+        } catch {
+          // Bypassed if /tmp is not ready
+        }
+      }
+
+      const activeFile = fs.existsSync(writeFile) ? writeFile : (seedFile && fs.existsSync(seedFile) ? seedFile : null);
+      if (activeFile) {
+        const raw = fs.readFileSync(activeFile, 'utf-8');
         const parsed = JSON.parse(raw);
         if (parsed.siteContent) this.data.siteContent = parsed.siteContent;
         if (parsed.programs) this.data.programs = parsed.programs;
@@ -549,12 +580,17 @@ class CmsStore {
 
   private saveToDisk() {
     try {
-      if (!fs.existsSync(DATA_DIR)) {
-        fs.mkdirSync(DATA_DIR, { recursive: true });
+      const { writeDir, writeFile } = getStorageConfig();
+      if (!fs.existsSync(writeDir)) {
+        try {
+          fs.mkdirSync(writeDir, { recursive: true });
+        } catch {
+          // Ignore
+        }
       }
-      fs.writeFileSync(DB_FILE, JSON.stringify(this.data, null, 2), 'utf-8');
-    } catch (e) {
-      console.error('Error saving CMS store to disk:', e);
+      fs.writeFileSync(writeFile, JSON.stringify(this.data, null, 2), 'utf-8');
+    } catch (e: any) {
+      console.warn('CMS store disk write bypassed (in-memory state active):', e?.message);
     }
   }
 

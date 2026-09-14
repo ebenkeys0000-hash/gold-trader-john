@@ -278,91 +278,100 @@ apiRouter.post('/ads/:id/click', (req: Request, res: Response) => {
 
 // 6. POST /api/applications (Public form submission)
 apiRouter.post('/applications', (req: Request, res: Response) => {
-  const body = req.body || {};
+  res.setHeader('Content-Type', 'application/json; charset=utf-8');
+  try {
+    const body = req.body || {};
 
-  // Honeypot spam trap
-  if (body.website_url_trap) {
-    return res.status(400).json({ success: false, error: 'Spam detected' });
-  }
+    // Honeypot spam trap
+    if (body.website_url_trap) {
+      return res.status(400).json({ success: false, error: 'Spam detected' });
+    }
 
-  // Check if registration enabled
-  const settings = cmsStore.getSettings();
-  if (settings.registration_enabled === false) {
-    return res.status(403).json({ success: false, error: 'Applications are currently paused. Please check back later.' });
-  }
+    // Check if registration enabled
+    const settings = cmsStore.getSettings();
+    if (settings.registration_enabled === false) {
+      return res.status(403).json({ success: false, error: 'Applications are currently paused. Please check back later.' });
+    }
 
-  // Server-side validation
-  const fullName = sanitize(body.fullName);
-  const email = sanitize(body.email);
-  const phone = sanitize(body.phone);
-  const country = sanitize(body.country);
-  const program = body.program;
-  const age = Number(body.age);
+    // Server-side validation
+    const fullName = sanitize(body.fullName);
+    const email = sanitize(body.email);
+    const phone = sanitize(body.phone);
+    const country = sanitize(body.country);
+    const program = body.program;
+    const age = Number(body.age);
 
-  if (!fullName || fullName.length < 2) {
-    return res.status(400).json({ success: false, error: 'Valid full legal name is required.' });
-  }
+    if (!fullName || fullName.length < 2) {
+      return res.status(400).json({ success: false, error: 'Please complete all required fields' });
+    }
 
-  const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-  if (!email || !emailRegex.test(email)) {
-    return res.status(400).json({ success: false, error: 'A valid email address is required.' });
-  }
+    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    if (!email || !emailRegex.test(email)) {
+      return res.status(400).json({ success: false, error: 'Please complete all required fields' });
+    }
 
-  if (!phone || phone.length < 6) {
-    return res.status(400).json({ success: false, error: 'Valid contact phone or WhatsApp number is required.' });
-  }
+    if (!phone || phone.length < 6) {
+      return res.status(400).json({ success: false, error: 'Please complete all required fields' });
+    }
 
-  if (!['student', 'mentee', 'partner'].includes(program)) {
-    return res.status(400).json({ success: false, error: 'Invalid program selected.' });
-  }
+    if (!['student', 'mentee', 'partner'].includes(program)) {
+      return res.status(400).json({ success: false, error: 'Invalid program selected.' });
+    }
 
-  // Check program active status
-  const programs = cmsStore.getPrograms();
-  const selectedProgram = programs.find(p => p.program_key === program);
-  if (selectedProgram && selectedProgram.status === 'inactive') {
-    return res.status(400).json({
+    // Check program active status
+    const programs = cmsStore.getPrograms();
+    const selectedProgram = programs.find(p => p.program_key === program);
+    if (selectedProgram && selectedProgram.status === 'inactive') {
+      return res.status(400).json({
+        success: false,
+        error: `The ${selectedProgram.program_name} track is currently unavailable for new enrollment.`
+      });
+    }
+
+    if (isNaN(age) || age < 18) {
+      return res.status(400).json({ success: false, error: 'Applicants must be at least 18 years of age.' });
+    }
+
+    if (!body.checkboxRiskNotGuaranteed || !body.checkboxAffordToLose) {
+      return res.status(400).json({ success: false, error: 'All mandatory risk acknowledgments must be checked.' });
+    }
+
+    if (program === 'partner' && !body.checkboxNoInterference) {
+      return res.status(400).json({ success: false, error: 'Investment partners must agree to the Non-Interference clause.' });
+    }
+
+    const createdApp = cmsStore.addApplication({
+      fullName,
+      email,
+      phone,
+      telegramUsername: sanitize(body.telegramUsername),
+      country: country || 'Unspecified',
+      age,
+      program,
+      tradingExperience: body.tradingExperience || 'Beginner',
+      brokerRegistrationStatus: body.brokerRegistrationStatus || 'Not yet registered',
+      proposedInvestmentAmount: sanitize(body.proposedInvestmentAmount),
+      maxLossWilling: sanitize(body.maxLossWilling),
+      hadManagedAccountBefore: body.hadManagedAccountBefore === 'Yes' ? 'Yes' : 'No',
+      checkboxRiskNotGuaranteed: Boolean(body.checkboxRiskNotGuaranteed),
+      checkboxProfitSharing: Boolean(body.checkboxProfitSharing),
+      checkboxAffordToLose: Boolean(body.checkboxAffordToLose),
+      checkboxNoInterference: Boolean(body.checkboxNoInterference)
+    });
+
+    return res.status(201).json({
+      success: true,
+      message: 'Application submitted successfully',
+      applicationId: createdApp.id,
+      createdAt: createdApp.createdAt
+    });
+  } catch (err: any) {
+    console.error('Registration processing error:', err);
+    return res.status(500).json({
       success: false,
-      error: `The ${selectedProgram.program_name} track is currently unavailable for new enrollment.`
+      error: 'Unable to submit application at this time'
     });
   }
-
-  if (isNaN(age) || age < 18) {
-    return res.status(400).json({ success: false, error: 'Applicants must be at least 18 years of age.' });
-  }
-
-  if (!body.checkboxRiskNotGuaranteed || !body.checkboxAffordToLose) {
-    return res.status(400).json({ success: false, error: 'All mandatory risk acknowledgments must be checked.' });
-  }
-
-  if (program === 'partner' && !body.checkboxNoInterference) {
-    return res.status(400).json({ success: false, error: 'Investment partners must agree to the Non-Interference clause.' });
-  }
-
-  const createdApp = cmsStore.addApplication({
-    fullName,
-    email,
-    phone,
-    telegramUsername: sanitize(body.telegramUsername),
-    country: country || 'Unspecified',
-    age,
-    program,
-    tradingExperience: body.tradingExperience || 'Beginner',
-    brokerRegistrationStatus: body.brokerRegistrationStatus || 'Not yet registered',
-    proposedInvestmentAmount: sanitize(body.proposedInvestmentAmount),
-    maxLossWilling: sanitize(body.maxLossWilling),
-    hadManagedAccountBefore: body.hadManagedAccountBefore === 'Yes' ? 'Yes' : 'No',
-    checkboxRiskNotGuaranteed: Boolean(body.checkboxRiskNotGuaranteed),
-    checkboxProfitSharing: Boolean(body.checkboxProfitSharing),
-    checkboxAffordToLose: Boolean(body.checkboxAffordToLose),
-    checkboxNoInterference: Boolean(body.checkboxNoInterference)
-  });
-
-  res.status(201).json({
-    success: true,
-    message: 'Application registered successfully and recorded in database.',
-    applicationId: createdApp.id,
-    createdAt: createdApp.createdAt
-  });
 });
 
 // ==============================================================================
@@ -371,6 +380,7 @@ apiRouter.post('/applications', (req: Request, res: Response) => {
 
 // Public configuration status check: audits presence of required env variables without exposing values
 apiRouter.get('/system/config-status', (req: Request, res: Response) => {
+  res.setHeader('Content-Type', 'application/json; charset=utf-8');
   res.json({
     success: true,
     ...getSystemConfigAudit()
@@ -379,6 +389,7 @@ apiRouter.get('/system/config-status', (req: Request, res: Response) => {
 
 // Public status check: checks if ADMIN_SECRET_KEY is configured on the server
 apiRouter.get('/admin/auth-status', (req: Request, res: Response) => {
+  res.setHeader('Content-Type', 'application/json; charset=utf-8');
   res.json({
     success: true,
     configured: isAuthConfigured()
@@ -387,13 +398,14 @@ apiRouter.get('/admin/auth-status', (req: Request, res: Response) => {
 
 // Admin login: verifies against server-side secret, sets HttpOnly secure cookie
 apiRouter.post('/admin/login', (req: Request, res: Response) => {
+  res.setHeader('Content-Type', 'application/json; charset=utf-8');
   const { password, email } = req.body || {};
 
   // Verify server configuration
   if (!isAuthConfigured()) {
     return res.status(503).json({
       success: false,
-      error: 'Administrator authentication is not configured on this server. Set the ADMIN_SECRET_KEY environment variable to enable admin access.'
+      error: 'ADMIN_SECRET_KEY environment variable is not configured on the server.'
     });
   }
 
@@ -408,7 +420,7 @@ apiRouter.post('/admin/login', (req: Request, res: Response) => {
   if (!verifyAdminPassword(password)) {
     return res.status(401).json({
       success: false,
-      error: 'Invalid administrator credentials.'
+      error: 'Invalid administrator credentials'
     });
   }
 
@@ -417,7 +429,7 @@ apiRouter.post('/admin/login', (req: Request, res: Response) => {
   cmsStore.logAudit(adminUser, 'STATUS_CHANGE', 'ADMIN_AUTH', 'SESSION', 'None', 'Admin signed in successfully');
 
   // Set secure HttpOnly cookie
-  const isHttps = req.secure || req.headers['x-forwarded-proto'] === 'https' || process.env.NODE_ENV === 'production';
+  const isHttps = req.secure || req.headers['x-forwarded-proto'] === 'https' || process.env.NODE_ENV === 'production' || !!process.env.VERCEL;
   res.cookie('admin_session', session.token, {
     httpOnly: true,
     secure: isHttps,
@@ -426,9 +438,10 @@ apiRouter.post('/admin/login', (req: Request, res: Response) => {
     path: '/'
   });
 
-  // Return user info only — session token is kept exclusively in the HttpOnly cookie
   return res.json({
     success: true,
+    message: 'Authentication successful',
+    token: session.token,
     user: {
       name: session.adminName,
       email: session.email,
@@ -439,12 +452,13 @@ apiRouter.post('/admin/login', (req: Request, res: Response) => {
 
 // Admin logout: invalidates session and clears cookie
 apiRouter.post('/admin/logout', requireAdmin, (req: AuthenticatedRequest, res: Response) => {
+  res.setHeader('Content-Type', 'application/json; charset=utf-8');
   const token = req.sessionToken || (req.cookies && req.cookies.admin_session) || (req.headers.authorization || '').replace('Bearer ', '').trim();
   if (token) {
     destroySession(token);
   }
 
-  const isHttps = req.secure || req.headers['x-forwarded-proto'] === 'https' || process.env.NODE_ENV === 'production';
+  const isHttps = req.secure || req.headers['x-forwarded-proto'] === 'https' || process.env.NODE_ENV === 'production' || !!process.env.VERCEL;
   res.clearCookie('admin_session', {
     httpOnly: true,
     secure: isHttps,
@@ -452,7 +466,10 @@ apiRouter.post('/admin/logout', requireAdmin, (req: AuthenticatedRequest, res: R
     path: '/'
   });
 
-  res.json({ success: true, message: 'Logged out successfully' });
+  res.json({
+    success: true,
+    message: 'Logged out successfully'
+  });
 });
 
 // Admin session verification: returns active session user info (no secrets)

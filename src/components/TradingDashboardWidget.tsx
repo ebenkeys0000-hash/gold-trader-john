@@ -90,12 +90,17 @@ export const TradingDashboardWidget: React.FC = () => {
 
     const fetchDirect = async () => {
       try {
-        const res = await fetch('/api/gold-price');
+        const res = await fetch('/api/gold-price', {
+          headers: { 'Accept': 'application/json' }
+        });
         if (res.ok) {
-          const json = await res.json();
-          if (json.success && json.data) {
-            handleNewMarketData(json.data);
-            setIsLiveConnected(true);
+          const ct = res.headers.get('content-type') || '';
+          if (ct.includes('application/json')) {
+            const json = await res.json();
+            if (json && json.success && json.data) {
+              handleNewMarketData(json.data);
+              setIsLiveConnected(true);
+            }
           }
         }
       } catch {

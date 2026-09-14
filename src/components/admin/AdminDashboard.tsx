@@ -63,11 +63,15 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onClose }) => {
 
   // Check if server has ADMIN_SECRET_KEY configured
   useEffect(() => {
+    let isMounted = true;
     cmsApi.checkAuthStatus().then(res => {
-      setServerAuthConfigured(res.configured);
+      if (isMounted && typeof res.configured === 'boolean') {
+        setServerAuthConfigured(res.configured);
+      }
     }).catch(() => {
-      setServerAuthConfigured(false);
+      // If endpoint is unreachable, do not falsely claim secret key is missing
     });
+    return () => { isMounted = false; };
   }, []);
 
   const handleLoginSubmit = async (e: React.FormEvent) => {
@@ -81,7 +85,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onClose }) => {
       setLoginError('');
       const res = await adminLogin(password);
       if (!res.success) {
-        setLoginError(res.error || 'Invalid administrator passcode.');
+        setLoginError(res.error || 'Invalid administrator credentials');
       }
     } catch (err: any) {
       setLoginError(err.message || 'Authentication failed. Please verify credentials.');

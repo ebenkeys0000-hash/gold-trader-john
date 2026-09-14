@@ -18,29 +18,113 @@ const CACHE_KEY_CONTACTS = 'gtj_cms_contacts_cache';
 const CACHE_KEY_FAQ = 'gtj_cms_faq_cache';
 const CACHE_KEY_SETTINGS = 'gtj_cms_settings_cache';
 
-// Admin authentication uses secure server-side HttpOnly cookies with credentials: 'include'.
-// No tokens or credentials are EVER stored in localStorage, sessionStorage, or client memory.
-const getAuthHeaders = (): HeadersInit => {
-  return {
-    'Content-Type': 'application/json',
-  };
+let currentAuthToken: string | null = null;
+
+// Allow storing session token in memory for API calls (in addition to HttpOnly cookie)
+export const setAuthToken = (token: string | null) => {
+  currentAuthToken = token;
 };
 
-// Safe fetch wrapper with credentials: 'include' for HttpOnly cookie support
+export const getAuthToken = (): string | null => {
+  return currentAuthToken;
+};
+
+const getAuthHeaders = (): Record<string, string> => {
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+    'Accept': 'application/json'
+  };
+  if (currentAuthToken) {
+    headers['Authorization'] = `Bearer ${currentAuthToken}`;
+  }
+  return headers;
+};
+
+/**
+ * Safe fetch wrapper that:
+ * 1. Sends credentials: 'include' for HttpOnly cookie session support
+ * 2. Checks response.ok BEFORE calling response.json()
+ * 3. Inspects response Content-Type header to ensure JSON
+ * 4. Extracts useful error messages from JSON or text without dumping HTML tags
+ * 5. NEVER throws "Unexpected token 'T', ... is not valid JSON"
+ */
 async function safeFetch<T>(url: string, options?: RequestInit): Promise<T> {
+  const authHeaders = currentAuthToken ? { 'Authorization': `Bearer ${currentAuthToken}` } : {};
   const mergedOptions: RequestInit = {
     credentials: 'include',
     ...options,
     headers: {
+      'Accept': 'application/json',
+      ...authHeaders,
       ...(options?.headers || {})
     }
   };
-  const res = await fetch(url, mergedOptions);
-  const data = await res.json();
-  if (!res.ok) {
-    throw new Error(data.error || `HTTP error ${res.status}`);
+
+  let res: Response;
+  try {
+    res = await fetch(url, mergedOptions);
+  } catch (networkError: any) {
+    throw new Error(`Network connection error: ${networkError?.message || 'Unable to connect to the server'}`);
   }
-  return data;
+
+  const contentType = res.headers.get('content-type') || '';
+  const isJson = contentType.toLowerCase().includes('application/json');
+
+  // If HTTP status is NOT ok (e.g. 400, 401, 403, 404, 500, 503)
+  if (!res.ok) {
+    let errorMessage = `Server returned HTTP ${res.status}`;
+
+    if (isJson) {
+      try {
+        const errorData = await res.json();
+        errorMessage = errorData?.error || errorData?.message || errorMessage;
+      } catch {
+        errorMessage = `Server returned HTTP ${res.status} (${res.statusText || 'Error'})`;
+      }
+    } else {
+      // Non-JSON response (e.g. Vercel 404 "The page could not be found" or HTML error page)
+      try {
+        const text = await res.text();
+        if (text && text.trim().length > 0) {
+          if (text.includes('<!DOCTYPE') || text.includes('<html') || text.includes('The page could not be found')) {
+            errorMessage = `API endpoint unavailable (${res.status} ${res.statusText || 'Not Found'}). The requested backend route could not be reached.`;
+          } else {
+            const cleanText = text.trim();
+            errorMessage = cleanText.length > 200 ? `${cleanText.slice(0, 200)}...` : cleanText;
+          }
+        }
+      } catch {
+        // Fallback to HTTP status
+      }
+    }
+
+    throw new Error(errorMessage);
+  }
+
+  // If HTTP status is OK (200-299) but content is NOT JSON (e.g., SPA rewrite returning index.html)
+  if (!isJson) {
+    let isHtml = false;
+    try {
+      const text = await res.text();
+      isHtml = text.includes('<!DOCTYPE') || text.includes('<html');
+    } catch {
+      // Ignore
+    }
+
+    if (isHtml) {
+      throw new Error(`API configuration error: endpoint ${url} returned an HTML page instead of JSON. Ensure the server or Vercel serverless function is configured.`);
+    }
+
+    throw new Error(`Invalid response format from ${url}: expected application/json, received '${contentType || 'unknown'}'.`);
+  }
+
+  // Safely parse JSON
+  try {
+    const data = await res.json();
+    return data as T;
+  } catch (parseError: any) {
+    throw new Error(`Failed to parse response from server (${url}): ${parseError?.message || 'Invalid JSON syntax'}`);
+  }
 }
 
 export const cmsApi = {
@@ -108,18 +192,21 @@ export const cmsApi = {
   async submitApplication(appData: any): Promise<{ success: boolean; applicationId: string; message: string }> {
     return safeFetch('/api/applications', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 
+        'Content-Type': 'application/json',
+        'Accept': 'application/json'
+      },
       body: JSON.stringify(appData)
     });
   },
 
-  // Admin Auth
-  async checkAuthStatus(): Promise<{ configured: boolean }> {
+  // Admin Auth Status check
+  async checkAuthStatus(): Promise<{ configured: boolean; error?: string }> {
     try {
       const res = await safeFetch<{ success: boolean; configured: boolean }>('/api/admin/auth-status');
       return { configured: Boolean(res.configured) };
-    } catch {
-      return { configured: false };
+    } catch (err: any) {
+      return { configured: false, error: err.message };
     }
   },
 
@@ -136,12 +223,19 @@ export const cmsApi = {
     };
   },
 
-  async login(password: string, email?: string): Promise<{ success: boolean; user: any }> {
-    return safeFetch<{ success: boolean; user: any }>('/api/admin/login', {
+  async login(password: string, email?: string): Promise<{ success: boolean; user: any; message?: string; token?: string }> {
+    const res = await safeFetch<{ success: boolean; user: any; message?: string; token?: string }>('/api/admin/login', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 
+        'Content-Type': 'application/json',
+        'Accept': 'application/json'
+      },
       body: JSON.stringify({ password, email })
     });
+    if (res.success && res.token) {
+      setAuthToken(res.token);
+    }
+    return res;
   },
 
   async checkAuth(): Promise<{ success: boolean; user: any }> {
@@ -151,10 +245,14 @@ export const cmsApi = {
   },
 
   async logout(): Promise<void> {
-    await safeFetch('/api/admin/logout', {
-      method: 'POST',
-      headers: getAuthHeaders()
-    });
+    try {
+      await safeFetch('/api/admin/logout', {
+        method: 'POST',
+        headers: getAuthHeaders()
+      });
+    } finally {
+      setAuthToken(null);
+    }
   },
 
   // Admin Operations
